@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Face Setup</title>
+  <link rel="stylesheet" href="css/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+</head>
+<body>
+
+  <div class="container" style="width: 420px;">
+    <h2>Face Setup</h2>
+    <p class="muted">Align your face in the camera and click “Save Face”.</p>
+
+    <video id="video" autoplay playsinline style="width:100%; border-radius:10px;"></video>
+    <p id="status" class="muted"></p>
+
+    <button onclick="saveFace()">Save Face</button>
+    <button class="btn-secondary" onclick="back()">Back</button>
+  </div>
+
+  <script defer src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+
+  <script type="module">
+    import { auth, db } from "./js/firebase.js";
+    import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+    import { doc, getDoc, updateDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+    const video = document.getElementById("video");
+    const statusEl = document.getElementById("status");
+
+    async function startCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+      video.srcObject = stream;
+    }
+
+    async function loadFaceModels() {
+      const MODEL_URL = "/models";
+      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+    }
+
+    async function getDescriptor() {
+      const det = await faceapi
+        .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+
+      if (!det) return null;
+      return Array.from(det.descriptor);
+    }
+
+    window.back = () => window.location.href = "dashboard.html";
+
+    let uid = null;
+
+    onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        window.location.href = "index.html";
+        return;
+      }
+      uid = user.uid;
+
+      statusEl.textContent = "Loading models...";
+      await loadFaceModels();
+
+      statusEl.textContent = "Starting camera...";
+      await startCamera();
+
+      statusEl.textContent = "Ready. Make sure your face is visible.";
+    });
+
+    window.saveFace = async function () {
+      if (!uid) return;
+
+      statusEl.textContent = "Scanning face...";
+
+    const descriptor = await getDescriptor();
+
+    console.log("Descriptor length before save:", descriptor.length);
+    statusEl.textContent = "Descriptor length: " + descriptor.length;
+
+    if (!descriptor) {
+    alert("No face detected. Try again with better lighting.");
+    statusEl.textContent = "No face detected.";
+    return;
+    }
+
+    if (!Array.isArray(descriptor) || descriptor.length !== 128) {
+    alert("Face data is invalid (needs 128 values). Please try again.");
+    statusEl.textContent = `Invalid face descriptor length: ${descriptor.length}`;
+    return;
+    }
+
+    await updateDoc(doc(db, "users", uid), {
+    faceDescriptor: descriptor
+    });
+
+    alert("Face saved! You can now Time In/Out.");
+    window.location.href = "dashboard.html";
+    };
+  </script>
+
+</body>
+</html>

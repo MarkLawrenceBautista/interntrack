@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>InternTrack Dashboard</title>
+  <link rel="stylesheet" href="css/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+</head>
+<body>
+
+  <div class="app">
+
+    <div class="panel">
+      <h2>Dashboard</h2>
+
+      <div class="card">
+        <div><b>Name:</b> <span id="uName">-</span></div>
+        <div><b>Department:</b> <span id="uDept">-</span></div>
+        <div><b>Hours needed:</b> <span id="uRequired">-</span></div>
+        <div><b>Hours rendered:</b> <span id="uRendered">-</span></div>
+        <div><b>Hours remaining:</b> <span id="uRemaining">-</span></div>
+        <div><b>Days to complete (8 hrs/day):</b> <span id="uDays">-</span></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0;">Daily Time Record</h3>
+        <div class="muted" id="monthLabel" style="margin-top:6px;">For the month of -</div>
+
+        <div style="overflow:auto; margin-top:10px;">
+          <table class="dtr-table">
+            <thead>
+              <tr>
+                <th>DAY</th>
+                <th>DATE</th>
+                <th>ARRIVAL</th>
+                <th>DEPARTURE</th>
+                <th>WORK TYPE</th>
+              </tr>
+            </thead>
+            <tbody id="dtrBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <button onclick="logout()" class="btn-secondary">Logout</button>
+      <p id="status" class="muted">Logged in.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Attendance</h2>
+
+      <div class="card">
+        <label><b>Work Type</b></label>
+        <select id="workType">
+          <option value="Onsite">Onsite</option>
+          <option value="WFH">Work From Home</option>
+        </select>
+
+        <p class="muted" style="margin-top:10px;">Camera Preview</p>
+        <video id="video" autoplay playsinline style="display:none; width:100%; max-width:420px; border-radius:10px;"></video>
+        <canvas id="canvas" style="display:none;"></canvas>
+
+        <div style="display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;">
+          <button id="btnStartAuto" type="button">Start Auto Time In</button>
+          <button id="btnStopAuto" type="button" class="btn-secondary" disabled>Stop</button>
+          <button onclick="timeOut()" type="button">Time Out</button>
+        </div>
+
+        <p class="muted" style="margin-top:10px;">
+          Note: System prevents duplicate Time In/Out for the same AM/PM slot.
+        </p>
+      </div>
+    </div>
+
+  </div>
+
+  <script defer src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+
+  <script type="module">
+    import { auth, db } from "./js/firebase.js";
+    import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+    import {
+      doc, getDoc,
+      addDoc, collection,
+      query, where, orderBy, getDocs,
+      serverTimestamp
+    } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const statusEl = document.getElementById("status");
+
+    const uName = document.getElementById("uName");
+    const uDept = document.getElementById("uDept");
+    const uRequired = document.getElementById("uRequired");
+    const uRendered = document.getElementById("uRendered");
+    const uRemaining = document.getElementById("uRemaining");
+    const uDays = document.getElementById("uDays");
+
+    const dtrBody = document.getElementById("dtrBody");
+    const monthLabel = document.getElementById("monthLabel");
+
+    const btnStartAuto = document.getElementById("btnStartAuto");
+    const btnStopAuto = document.getElementById("btnStopAuto");
+
+    let cameraStream = null;
+    let modelsLoaded = false;
+
+    let currentUid = null;
+    let requiredHours = 0;
+
+    let isAutoTimingIn = false;
+    let autoScanInterval = null;
+
+    let hasFace = false;
+
+    function formatTime(d) {
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
+    function startOfToday() {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      return d;
+    }
+
+    function startOfTomorrow() {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() + 1);
+      return d;
+    }
+
+    function isAM(dateObj) {
+      return dateObj.getHours() < 12;
+    }
+
+    function slotKey(type, dateObj) {
+      const am = isAM(dateObj);
+      if (type === "Time In") return am ? "amIn" : "pmIn";
+      if (type === "Time Out") return am ? "amOut" : "pmOut";
+      return null;
+    }
+
+    async function updateWorkTypeLock(uid) {
+      const workTypeSelect = document.getElementById("workType");
+      if (!workTypeSelect) return;
+
+      const q = query(
+        collection(db, "attendance"),
+        where("userId", "==", uid),
+        where("timestamp", ">=", startOfToday()),
+        where("timestamp", "<", startOfTomorrow()),
+        orderBy("timestamp", "asc")
+      );
+
+      const snap = await getDocs(q);
+
+      let active = false;
+      let lockedWorkType = "";
+
+      snap.forEach(docu => {
+        const a = docu.data();
+        if (!a.timestamp) return;
+
+        if (a.type === "Time In") {
+          active = true;
+          lockedWorkType = a.workType || lockedWorkType;
+        } else if (a.type === "Time Out") {
+          active = false;
+        }
+      });
+
+      if (active) {
+        if (lockedWorkType) workTypeSelect.value = lockedWorkType;
+        workTypeSelect.disabled = true;
+      } else {
+        workTypeSelect.disabled = false;
+      }
+    }
+
+    async function loadFaceModelsOnce() {
+      if (modelsLoaded) return;
+      const MODEL_URL = "/models";
+      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+      modelsLoaded = true;
+    }
+
+    async function getDescriptorFromVideo() {
+      const options = new faceapi.TinyFaceDetectorOptions({
+        inputSize: 416,
+        scoreThreshold: 0.5
+      });
+
+      const det = await faceapi
+        .detectSingleFace(video, options)
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+
+      if (!det) return null;
+      return Array.from(det.descriptor);
+    }
+
+    function euclideanDistance(a, b) {
+      let sum = 0;
+      for (let i = 0; i < a.length; i++) {
+        const diff = a[i] - b[i];
+        sum += diff * diff;
+      }
+      return Math.sqrt(sum);
+    }
+
+    async function verifyFace(uid) {
+      const snap = await getDoc(doc(db, "users", uid));
+      const saved = snap.exists() ? snap.data().faceDescriptor : null;
+
+      if (!saved || !Array.isArray(saved) || saved.length !== 128) {
+        statusEl.textContent = "No registered face. Redirecting to setup...";
+        window.location.href = "setup-face.html";
+        return false;
+      }
+
+      const current = await getDescriptorFromVideo();
+      if (!current) {
+        statusEl.textContent = "No face detected. Center your face + add light.";
+        return false;
+      }
+      if (!Array.isArray(current) || current.length !== 128) {
+        statusEl.textContent = `Invalid live face descriptor length: ${current?.length}`;
+        return false;
+      }
+
+      const dist = euclideanDistance(saved, current);
+      statusEl.textContent = `Face detected. Match distance: ${dist.toFixed(3)}`;
+
+      const THRESHOLD = 0.65;
+      return dist < THRESHOLD;
+    }
+
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user" },
+          audio: false
+        });
+
+        cameraStream = stream;
+        video.srcObject = stream;
+        video.style.display = "block";
+
+        await new Promise((resolve) => {
+          if (video.videoWidth) return resolve();
+          video.onloadedmetadata = () => resolve();
+        });
+
+      } catch (err) {
+        alert("Camera access failed. Allow camera permission.\n\n" + err.message);
+        statusEl.textContent = "Camera error: " + err.message;
+        throw err;
+      }
+    }
+
+    function stopCamera() {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream = null;
+      }
+      video.srcObject = null;
+      video.style.display = "none";
+    }
+
+    function captureImageBase64() {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (!w || !h) throw new Error("Camera not ready yet. Wait 1–2 seconds.");
+
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, w, h);
+
+      return canvas.toDataURL("image/jpeg", 0.6);
+    }
+
+    async function loadUserProfile(uid) {
+      const snap = await getDoc(doc(db, "users", uid));
+      if (!snap.exists()) throw new Error("User profile not found in Firestore.");
+
+      const data = snap.data();
+
+      hasFace = Array.isArray(data.faceDescriptor) && data.faceDescriptor.length === 128;
+
+      uName.textContent = data.name ?? "-";
+      uDept.textContent = data.department ?? "-";
+
+      requiredHours = Number(data.requiredHours ?? 0);
+      uRequired.textContent = requiredHours ? `${requiredHours} hrs` : "-";
+    }
+
+    async function loadMonthlyDTR(uid) {
+      const now = new Date();
+      const year = now.getFullYear();
+      const monthIndex = now.getMonth();
+
+      const monthName = new Date(year, monthIndex, 1).toLocaleDateString([], {
+        month: "long",
+        year: "numeric"
+      });
+      monthLabel.textContent = `For the month of ${monthName}`;
+
+      dtrBody.innerHTML = "";
+
+      const start = new Date(year, monthIndex, 1, 0, 0, 0, 0);
+      const end = new Date(year, monthIndex + 1, 1, 0, 0, 0, 0);
+
+      const q = query(
+        collection(db, "attendance"),
+        where("userId", "==", uid),
+        where("timestamp", ">=", start),
+        where("timestamp", "<", end),
+        orderBy("timestamp", "asc")
+      );
+
+      const snap = await getDocs(q);
+
+      const byDay = new Map();
+
+      snap.forEach(docu => {
+        const a = docu.data();
+        if (!a.timestamp) return;
+
+        const dt = a.timestamp.toDate();
+
+        const yyyy = dt.getFullYear();
+        const mm = String(dt.getMonth() + 1).padStart(2, "0");
+        const dd = String(dt.getDate()).padStart(2, "0");
+        const dayKey = `${yyyy}-${mm}-${dd}`;
+
+        if (!byDay.has(dayKey)) {
+          byDay.set(dayKey, {
+            dateObj: new Date(yyyy, dt.getMonth(), dt.getDate()),
+            arrival: "",
+            departure: "",
+            workType: ""
+          });
+        }
+
+        const entry = byDay.get(dayKey);
+
+        if (a.type === "Time In") {
+          if (!entry.arrival) entry.arrival = formatTime(dt);
+          if (!entry.workType && a.workType) entry.workType = a.workType;
+        }
+
+        if (a.type === "Time Out") {
+          entry.departure = formatTime(dt);
+          if (!entry.workType && a.workType) entry.workType = a.workType;
+        }
+      });
+
+      const rows = Array.from(byDay.values()).sort((a, b) => a.dateObj - b.dateObj);
+
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="5" style="text-align:center;">No attendance records for this month yet.</td>`;
+        dtrBody.appendChild(tr);
+        return;
+      }
+
+      rows.forEach((r, index) => {
+        const dateLabel = r.dateObj.toLocaleDateString("en-GB", {
+          day: "2-digit",
+          month: "short",
+          year: "2-digit"
+        }).replace(/ /g, "-");
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${index + 1}</td>
+          <td>${dateLabel}</td>
+          <td>${r.arrival || "-"}</td>
+          <td>${r.departure || "-"}</td>
+          <td>${r.workType || "-"}</td>
+        `;
+        dtrBody.appendChild(tr);
+      });
+    }
+
+    async function computeRenderedHours(uid) {
+      const q = query(
+        collection(db, "attendance"),
+        where("userId", "==", uid),
+        orderBy("timestamp", "asc")
+      );
+
+      const snap = await getDocs(q);
+
+      let lastIn = null;
+      let totalMs = 0;
+
+      snap.forEach(docu => {
+        const a = docu.data();
+        if (!a.timestamp) return;
+
+        if (a.type === "Time In") {
+          lastIn = a.timestamp.toDate();
+        } else if (a.type === "Time Out" && lastIn) {
+          const out = a.timestamp.toDate();
+          const diff = out - lastIn;
+          if (diff > 0) totalMs += diff;
+          lastIn = null;
+        }
+      });
+
+      const hours = totalMs / (1000 * 60 * 60);
+      const rounded = Math.floor(hours * 100) / 100;
+
+      uRendered.textContent = `${rounded} hrs`;
+
+      const remaining = Math.max(0, (requiredHours || 0) - rounded);
+      const remainingRounded = Math.floor(remaining * 100) / 100;
+
+      uRemaining.textContent = requiredHours ? `${remainingRounded} hrs` : "-";
+
+      if (requiredHours) {
+        const daysNeeded = Math.ceil(remainingRounded / 8);
+        uDays.textContent = `${daysNeeded} day(s)`;
+      } else {
+        uDays.textContent = "-";
+      }
+    }
+
+    async function getTodaySlots(uid) {
+      const q = query(
+        collection(db, "attendance"),
+        where("userId", "==", uid),
+        where("timestamp", ">=", startOfToday()),
+        where("timestamp", "<", startOfTomorrow()),
+        orderBy("timestamp", "asc")
+      );
+
+      const snap = await getDocs(q);
+
+      const slots = { amIn: false, pmIn: false, amOut: false, pmOut: false };
+
+      snap.forEach(docu => {
+        const a = docu.data();
+        if (!a.timestamp) return;
+
+        const dt = a.timestamp.toDate();
+        const key = slotKey(a.type, dt);
+        if (key) slots[key] = true;
+      });
+
+      return slots;
+    }
+
+    async function refreshAll() {
+      if (!currentUid) return;
+      await computeRenderedHours(currentUid);
+      await loadMonthlyDTR(currentUid);
+      await updateWorkTypeLock(currentUid);
+    }
+
+    function stopAutoTimeInLoop() {
+      if (autoScanInterval) clearInterval(autoScanInterval);
+      autoScanInterval = null;
+
+      btnStartAuto.disabled = false;
+      btnStopAuto.disabled = true;
+
+      stopCamera();
+      statusEl.textContent = "Auto Time In stopped. Camera off.";
+    }
+
+    async function startAutoTimeInLoop() {
+      if (!currentUid) return;
+
+      btnStartAuto.disabled = true;
+      btnStopAuto.disabled = false;
+
+      statusEl.textContent = "Starting camera...";
+      await startCamera();
+
+      statusEl.textContent = "Loading face models...";
+      await loadFaceModelsOnce();
+
+      statusEl.textContent = "Auto Time In armed. Scanning...";
+
+      if (autoScanInterval) clearInterval(autoScanInterval);
+
+      autoScanInterval = setInterval(async () => {
+        if (isAutoTimingIn) return;
+
+        try {
+          isAutoTimingIn = true;
+
+          const slots = await getTodaySlots(currentUid);
+          if (slots.amIn || slots.pmIn) {
+            statusEl.textContent = "You are already timed in today.";
+            stopAutoTimeInLoop();
+            return;
+          }
+
+          const ok = await verifyFace(currentUid);
+          if (!ok) return;
+
+          const workTypeVal = document.getElementById("workType").value;
+          const confirmGo = confirm(`Time In now?\nWork Type: ${workTypeVal}`);
+          if (!confirmGo) {
+            statusEl.textContent = "Time In canceled.";
+            stopAutoTimeInLoop();
+            return;
+          }
+
+          await addDoc(collection(db, "attendance"), {
+            userId: currentUid,
+            type: "Time In",
+            workType: workTypeVal,
+            imageBase64: captureImageBase64(),
+            timestamp: serverTimestamp()
+          });
+
+          alert("Time In recorded!");
+          statusEl.textContent = "✅ Timed In successfully!";
+          await refreshAll();
+
+          stopAutoTimeInLoop();
+        } catch (e) {
+          console.error(e);
+          statusEl.textContent = "Auto Time In error. Check console.";
+        } finally {
+          isAutoTimingIn = false;
+        }
+      }, 1200);
+    }
+
+    btnStartAuto.addEventListener("click", async () => {
+      try {
+        await startAutoTimeInLoop();
+      } catch (e) {
+        console.error(e);
+        btnStartAuto.disabled = false;
+        btnStopAuto.disabled = true;
+      }
+    });
+
+    btnStopAuto.addEventListener("click", () => {
+      stopAutoTimeInLoop();
+    });
+
+    async function saveAttendance(type) {
+      if (!cameraStream) {
+        statusEl.textContent = "Starting camera for Time Out...";
+        await startCamera();
+        await loadFaceModelsOnce();
+      }
+
+      const ok = await verifyFace(currentUid);
+      if (!ok) {
+        alert("Face not matched. Attendance blocked.");
+        return;
+      }
+
+      const now = new Date();
+      const workType = document.getElementById("workType").value;
+
+      if (!currentUid) {
+        alert("Not logged in.");
+        window.location.href = "index.html";
+        return;
+      }
+
+      statusEl.textContent = "Recording " + type + "...";
+
+      const slots = await getTodaySlots(currentUid);
+      const nowSlot = slotKey(type, now);
+
+      if (type === "Time Out" && !(slots.amIn || slots.pmIn)) {
+        alert("You cannot Time Out without Time In today.");
+        statusEl.textContent = "Blocked: No Time In today.";
+        return;
+      }
+
+      if (nowSlot && slots[nowSlot]) {
+        alert("Duplicate: You already recorded this AM/PM slot today.");
+        statusEl.textContent = "Blocked: Duplicate.";
+        return;
+      }
+
+      let imageBase64;
+      try {
+        imageBase64 = captureImageBase64();
+      } catch (e) {
+        alert(e.message);
+        statusEl.textContent = "Camera not ready.";
+        return;
+      }
+
+      try {
+        await addDoc(collection(db, "attendance"), {
+          userId: currentUid,
+          type,
+          workType,
+          imageBase64,
+          timestamp: serverTimestamp()
+        });
+
+        alert(type + " recorded!");
+        statusEl.textContent = type + " saved. Updating table...";
+        await refreshAll();
+        statusEl.textContent = "Updated.";
+
+        stopCamera();
+
+      } catch (e) {
+        console.error(e);
+        alert("Failed to save attendance. Check console.");
+        statusEl.textContent = "Save failed.";
+      }
+    }
+
+    window.timeOut = () => saveAttendance("Time Out");
+
+    window.logout = async function () {
+      await signOut(auth);
+      window.location.href = "index.html";
+    };
+
+    onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        window.location.href = "index.html";
+        return;
+      }
+
+      currentUid = user.uid;
+
+      await loadUserProfile(currentUid);
+
+      if (!hasFace) {
+        window.location.href = "setup-face.html";
+        return;
+      }
+
+      await loadFaceModelsOnce();
+      await refreshAll();
+
+      statusEl.textContent = "Ready. Click 'Start Auto Time In' to open camera.";
+    });
+
+    window.addEventListener("beforeunload", () => {
+      if (autoScanInterval) clearInterval(autoScanInterval);
+      stopCamera();
+    });
+  </script>
+
+</body>
+</html>

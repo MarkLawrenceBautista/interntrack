@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>InternTrack Login</title>
+  <link rel="stylesheet" href="css/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+</head>
+<body>
+
+  <div class="container">
+    <h2>InternTrack Login</h2>
+    <p class="subtitle">Enter your Company Account and Password</p>
+
+    <input type="email" id="email" placeholder="Company Account" required>
+    <input type="password" id="password" placeholder="Password" required>
+
+    <p style="margin-top:8px; margin-bottom:14px;">
+      <a href="#" onclick="forgotPassword(); return false;">Forgot Password?</a>
+      <span style="margin: 0 8px;">|</span>
+      <a href="#" onclick="resendVerification(); return false;">Resend Verification</a>
+    </p>
+
+    <button onclick="loginIntern()">Login as Intern</button>
+    <button style="background:#dc3545;" onclick="loginAdmin()">Login as Admin</button>
+
+    <p>Don't have account? <a href="register.html">Register</a></p>
+  </div>
+
+  <script type="module">
+    import { auth, db } from "./js/firebase.js";
+    import {
+      signInWithEmailAndPassword,
+      signOut,
+      sendPasswordResetEmail,
+      sendEmailVerification
+    } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+    import { doc, getDoc }
+      from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+    window.loginIntern = async function () {
+      await loginUser("intern");
+    };
+
+    window.loginAdmin = async function () {
+      await loginUser("admin");
+    };
+
+    function getEmailInput() {
+      return document.getElementById("email").value.trim().toLowerCase();
+    }
+
+    function getPasswordInput() {
+      return document.getElementById("password").value;
+    }
+
+    function enforcePluk(email) {
+      if (!email.startsWith("pluk.")) {
+        alert("Company account must start with 'pluk.'\nExample: pluk.marklawrencebautista@gmail.com");
+        return false;
+      }
+      return true;
+    }
+
+    async function loginUser(expectedRole) {
+      const email = getEmailInput();
+      const password = getPasswordInput();
+
+      if (!email || !password) {
+        alert("Please fill all fields.");
+        return;
+      }
+
+      if (!enforcePluk(email)) return;
+
+      try {
+        const userCredential = await signInWithEmailAndPassword(auth, email, password);
+        const user = userCredential.user;
+
+        if (!user.emailVerified) {
+          alert("Please verify your email before logging in.\nYou can click 'Resend Verification'.");
+          await signOut(auth);
+          return;
+        }
+
+        const snap = await getDoc(doc(db, "users", user.uid));
+        const role = snap.exists() ? snap.data().role : null;
+
+        if (expectedRole === "admin") {
+          if (role !== "admin") {
+            alert("Access denied. Not an admin account.");
+            await signOut(auth);
+            return;
+          }
+          window.location.href = "admin.html";
+        } else {
+          window.location.href = "dashboard.html";
+        }
+
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    window.forgotPassword = async function () {
+      const email = getEmailInput();
+
+      if (!email) {
+        alert("Please enter your Company Account email first.");
+        return;
+      }
+
+      if (!enforcePluk(email)) return;
+
+      try {
+        await sendPasswordResetEmail(auth, email);
+        alert("Password reset email sent!\nCheck your inbox/spam for the reset link.");
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+
+    window.resendVerification = async function () {
+      const email = getEmailInput();
+      const password = getPasswordInput();
+
+      if (!email || !password) {
+        alert("Enter your Company Account and Password first, then click Resend Verification.");
+        return;
+      }
+
+      if (!enforcePluk(email)) return;
+
+      try {
+        const userCredential = await signInWithEmailAndPassword(auth, email, password);
+        const user = userCredential.user;
+
+        if (user.emailVerified) {
+          alert("Your email is already verified. You can log in now.");
+          await signOut(auth);
+          return;
+        }
+
+        await sendEmailVerification(user);
+        alert("Verification email sent!\nPlease check your inbox/spam, then log in again.");
+
+        await signOut(auth);
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+  </script>
+
+</body>
+</html>

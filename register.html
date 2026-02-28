@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>InternTrack Register</title>
+  <link rel="stylesheet" href="css/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+</head>
+<body>
+
+  <div class="container">
+    <h2>Register</h2>
+
+    <form id="registerForm">
+      <input type="text" id="name" placeholder="Full Name" required>
+      <input type="text" id="department" placeholder="Department (e.g., BSIT)" required>
+      <input type="number" id="requiredHours" placeholder="Hours needed to complete" min="1" required>
+
+      <hr style="margin: 14px 0;">
+
+      <input type="email" id="email" placeholder="Email (must start with pluk.)" required>
+
+      <input type="password" id="password" placeholder="Password" required>
+      <input type="password" id="confirmPassword" placeholder="Confirm Password" required>
+
+      <div class="show-password-row">
+        <input type="checkbox" id="showPassword">
+        <label for="showPassword">Show Password</label>
+      </div>
+
+      <button id="registerBtn" type="submit">Register</button>
+    </form>
+
+    <p>Already have account? <a href="index.html">Login</a></p>
+  </div>
+
+  <script type="module">
+    import { auth, db } from "./js/firebase.js";
+    import {
+      createUserWithEmailAndPassword,
+      sendEmailVerification
+    } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+    import { doc, setDoc, serverTimestamp }
+      from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+    const form = document.getElementById("registerForm");
+    const registerBtn = document.getElementById("registerBtn");
+
+    const passwordInput = document.getElementById("password");
+    const confirmPasswordInput = document.getElementById("confirmPassword");
+    const showPasswordCheckbox = document.getElementById("showPassword");
+
+    showPasswordCheckbox.addEventListener("change", () => {
+      const t = showPasswordCheckbox.checked ? "text" : "password";
+      passwordInput.type = t;
+      confirmPasswordInput.type = t;
+    });
+
+    function passwordIssues(pw) {
+      const issues = [];
+      if (pw.length < 8) issues.push("- At least 8 characters");
+      if (!/[A-Z]/.test(pw)) issues.push("- At least 1 uppercase letter");
+      if (!/[a-z]/.test(pw)) issues.push("- At least 1 lowercase letter");
+      if (!/[0-9]/.test(pw)) issues.push("- At least 1 number");
+      return issues;
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+
+      const name = document.getElementById("name").value.trim();
+      const department = document.getElementById("department").value.trim();
+      const requiredHoursRaw = document.getElementById("requiredHours").value;
+      const email = document.getElementById("email").value.trim().toLowerCase();
+
+      const password = passwordInput.value;
+      const confirmPassword = confirmPasswordInput.value;
+
+      if (!name || !department || !requiredHoursRaw || !email || !password || !confirmPassword) {
+        alert("Please fill all fields.");
+        return;
+      }
+
+      if (!email.startsWith("pluk.")) {
+        alert("Email must start with 'pluk.'\nExample: pluk.juan@gmail.com");
+        return;
+      }
+
+      const requiredHours = Number(requiredHoursRaw);
+      if (!Number.isFinite(requiredHours) || requiredHours <= 0) {
+        alert("Required hours must be valid.");
+        return;
+      }
+
+      const issues = passwordIssues(password);
+      if (issues.length) {
+        alert("Weak password:\n" + issues.join("\n"));
+        return;
+      }
+
+      if (password !== confirmPassword) {
+        alert("Passwords do not match.");
+        return;
+      }
+
+      registerBtn.disabled = true;
+      registerBtn.textContent = "Creating...";
+
+      try {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        const user = userCredential.user;
+
+        await sendEmailVerification(user);
+
+        await setDoc(doc(db, "users", user.uid), {
+          email,
+          name,
+          department,
+          requiredHours,
+          role: "intern",
+          createdAt: serverTimestamp()
+        });
+
+        alert("Account created!\n\nA verification email has been sent.\nPlease verify before logging in.");
+        window.location.href = "index.html";
+
+      } catch (error) {
+        alert(error.message);
+      } finally {
+        registerBtn.disabled = false;
+        registerBtn.textContent = "Register";
+      }
+    });
+  </script>
+
+</body>
+</html>

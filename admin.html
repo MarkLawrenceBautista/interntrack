@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>InternTrack Admin</title>
+  <link rel="stylesheet" href="css/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+</head>
+<body>
+
+  <div class="app" style="grid-template-columns: 1fr;">
+    <div class="panel">
+      <h2>Admin Panel</h2>
+      <p class="muted" id="adminStatus">Checking admin access...</p>
+
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+          <h3 style="margin:0;">All Interns</h3>
+          <input type="text" id="searchIntern" placeholder="Search name..." style="max-width:220px;">
+        </div>
+
+        <p class="muted" id="internCount" style="margin-top:6px;"></p>
+
+        <div style="overflow:auto; margin-top:10px;">
+          <table class="dtr-table" style="min-width:700px;">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Department</th>
+                <th>Required</th>
+                <th>Rendered</th>
+                <th>Remaining</th>
+              </tr>
+            </thead>
+            <tbody id="internBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+          <h3 style="margin:0;">Attendance Logs</h3>
+          <select id="logFilter" style="max-width:220px;">
+            <option value="all">All</option>
+            <option value="today">Today</option>
+            <option value="month">This Month</option>
+          </select>
+        </div>
+
+        <div style="overflow:auto; margin-top:10px;">
+          <table class="dtr-table" style="min-width:900px;">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Department</th>
+                <th>Date</th>
+                <th>Time</th>
+                <th>Type</th>
+                <th>Work Type</th>
+                <th>Photo</th>
+              </tr>
+            </thead>
+            <tbody id="logsBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <button class="btn-secondary" onclick="goDashboard()">Back to Dashboard</button>
+      <button class="btn-secondary" onclick="logout()">Logout</button>
+    </div>
+  </div>
+
+  <div id="photoModal" style="
+    display:none;
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,0.65);
+    padding:20px;
+    z-index:9999;
+  ">
+    <div style="
+      max-width:720px;
+      margin:40px auto;
+      background:#fff;
+      border-radius:12px;
+      padding:14px;
+    ">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+        <div>
+          <b id="photoTitle">Photo</b>
+          <div class="muted" id="photoSubtitle" style="margin-top:4px;"></div>
+        </div>
+        <button id="closePhotoBtn" class="btn-secondary" style="width:auto;">Close</button>
+      </div>
+
+      <div style="margin-top:12px; text-align:center;">
+        <img id="photoImg" src="" alt="Attendance Photo" style="max-width:100%; border-radius:10px;" />
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { auth, db } from "./js/firebase.js";
+    import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+    import {
+      doc, getDoc,
+      collection, getDocs,
+      query, where, orderBy, limit
+    } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+    const adminStatus = document.getElementById("adminStatus");
+
+    const internBody = document.getElementById("internBody");
+    const logsBody = document.getElementById("logsBody");
+    const searchIntern = document.getElementById("searchIntern");
+    const logFilter = document.getElementById("logFilter");
+    const internCount = document.getElementById("internCount");
+
+    const photoModal = document.getElementById("photoModal");
+    const photoImg = document.getElementById("photoImg");
+    const closePhotoBtn = document.getElementById("closePhotoBtn");
+    const photoTitle = document.getElementById("photoTitle");
+    const photoSubtitle = document.getElementById("photoSubtitle");
+
+    function openPhotoModal({ name, type, dt, img }) {
+      photoTitle.textContent = `${name || "Unknown"} — ${type || "Attendance"}`;
+      photoSubtitle.textContent = dt ? dt.toLocaleString() : "";
+      photoImg.src = img;
+      photoModal.style.display = "block";
+    }
+
+    function closePhotoModal() {
+      photoModal.style.display = "none";
+      photoImg.src = "";
+    }
+
+    closePhotoBtn.addEventListener("click", closePhotoModal);
+    photoModal.addEventListener("click", (e) => {
+      if (e.target === photoModal) closePhotoModal();
+    });
+
+    function fmtDate(d) {
+      return d.toLocaleDateString([], { month: "short", day: "2-digit", year: "numeric" });
+    }
+    function fmtTime(d) {
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
+    async function computeRendered(uid) {
+      const snap = await getDocs(query(
+        collection(db, "attendance"),
+        where("userId", "==", uid),
+        orderBy("timestamp", "asc")
+      ));
+
+      let lastIn = null;
+      let total = 0;
+
+      snap.forEach(docu => {
+        const a = docu.data();
+        if (!a.timestamp) return;
+
+        if (a.type === "Time In") {
+          lastIn = a.timestamp.toDate();
+        } else if (a.type === "Time Out" && lastIn) {
+          total += (a.timestamp.toDate() - lastIn);
+          lastIn = null;
+        }
+      });
+
+      return Math.floor((total / 3600000) * 100) / 100;
+    }
+
+    async function loadInterns() {
+      internBody.innerHTML = "";
+
+      const usersSnap = await getDocs(collection(db, "users"));
+      internCount.textContent = `Total Interns: ${usersSnap.size}`;
+
+      if (usersSnap.empty) {
+        internBody.innerHTML = `<tr><td colspan="5" style="text-align:center;">No users found.</td></tr>`;
+        return;
+      }
+
+      for (const docu of usersSnap.docs) {
+        const u = docu.data();
+        const uid = docu.id;
+
+        const required = Number(u.requiredHours ?? 0);
+        const rendered = await computeRendered(uid);
+        const remaining = Math.max(0, required - rendered);
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${u.name ?? ""}</td>
+          <td>${u.department ?? ""}</td>
+          <td>${required} hrs</td>
+          <td>${rendered} hrs</td>
+          <td>${remaining} hrs</td>
+        `;
+        internBody.appendChild(tr);
+      }
+    }
+
+    async function loadLogs() {
+      logsBody.innerHTML = "";
+
+      const usersSnap = await getDocs(collection(db, "users"));
+      const userMap = new Map();
+      usersSnap.forEach(d => userMap.set(d.id, d.data()));
+
+      const logsSnap = await getDocs(query(
+        collection(db, "attendance"),
+        orderBy("timestamp", "desc"),
+        limit(100)
+      ));
+
+      if (logsSnap.empty) {
+        logsBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">No attendance yet.</td></tr>`;
+        return;
+      }
+
+      const now = new Date();
+
+      logsSnap.forEach(docu => {
+        const a = docu.data();
+        const dt = a.timestamp?.toDate();
+        if (!dt) return;
+
+        if (logFilter.value === "today") {
+          if (dt.toDateString() !== now.toDateString()) return;
+        }
+        if (logFilter.value === "month") {
+          if (dt.getMonth() !== now.getMonth() || dt.getFullYear() !== now.getFullYear()) return;
+        }
+
+        const u = userMap.get(a.userId) || {};
+        const hasImg = !!a.imageBase64;
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${u.name ?? ""}</td>
+          <td>${u.department ?? ""}</td>
+          <td>${fmtDate(dt)}</td>
+          <td>${fmtTime(dt)}</td>
+          <td>${a.type ?? ""}</td>
+          <td>${a.workType ?? ""}</td>
+          <td>
+            ${hasImg ? `<button class="btn-secondary view-photo-btn" style="width:auto;">View</button>` : "-"}
+          </td>
+        `;
+
+        logsBody.appendChild(tr);
+
+        if (hasImg) {
+          const btn = tr.querySelector(".view-photo-btn");
+          btn.addEventListener("click", () => {
+            openPhotoModal({
+              name: u.name ?? "",
+              type: a.type ?? "",
+              dt: dt,
+              img: a.imageBase64
+            });
+          });
+        }
+      });
+    }
+
+    searchIntern.addEventListener("input", () => {
+      const filter = searchIntern.value.toLowerCase();
+      Array.from(internBody.children).forEach(row => {
+        row.style.display = row.innerText.toLowerCase().includes(filter) ? "" : "none";
+      });
+    });
+
+    logFilter.addEventListener("change", loadLogs);
+
+    window.goDashboard = () => window.location.href = "dashboard.html";
+
+    window.logout = async function () {
+      await signOut(auth);
+      window.location.href = "index.html";
+    };
+
+    onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        window.location.href = "index.html";
+        return;
+      }
+
+      const snap = await getDoc(doc(db, "users", user.uid));
+      if (!snap.exists() || snap.data().role !== "admin") {
+        alert("Admin only.");
+        window.location.href = "dashboard.html";
+        return;
+      }
+
+      adminStatus.textContent = "Admin access granted.";
+      await loadInterns();
+      await loadLogs();
+    });
+  </script>
+
+</body>
+</html>
