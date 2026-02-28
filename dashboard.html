@@ -12,8 +12,12 @@
     <div class="panel">
       <h2>Dashboard</h2>
 
+      <!-- Profile Card -->
       <div class="card">
-        <div><b>Name:</b> <span id="uName">-</span></div>
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <div><b>Name:</b> <span id="uName">-</span></div>
+          <span id="uRole" class="badge-role">-</span>
+        </div>
         <div><b>Department:</b> <span id="uDept">-</span></div>
         <div><b>Hours needed:</b> <span id="uRequired">-</span></div>
         <div><b>Hours rendered:</b> <span id="uRendered">-</span></div>
@@ -21,6 +25,30 @@
         <div><b>Days to complete (8 hrs/day):</b> <span id="uDays">-</span></div>
       </div>
 
+      <!-- Summary Cards -->
+      <div class="cards-4">
+        <div class="stat">
+          <div class="stat-label">Today Status</div>
+          <div class="stat-value" id="todayStatus">-</div>
+        </div>
+
+        <div class="stat">
+          <div class="stat-label">Hours Today</div>
+          <div class="stat-value" id="todayHours">-</div>
+        </div>
+
+        <div class="stat">
+          <div class="stat-label">Work Type Today</div>
+          <div class="stat-value" id="todayWorkType">-</div>
+        </div>
+
+        <div class="stat">
+          <div class="stat-label">Week Hours</div>
+          <div class="stat-value" id="weekHours">-</div>
+        </div>
+      </div>
+
+      <!-- DTR Table -->
       <div class="card">
         <h3 style="margin:0;">Daily Time Record</h3>
         <div class="muted" id="monthLabel" style="margin-top:6px;">For the month of -</div>
@@ -90,11 +118,17 @@
     const statusEl = document.getElementById("status");
 
     const uName = document.getElementById("uName");
+    const uRole = document.getElementById("uRole");
     const uDept = document.getElementById("uDept");
     const uRequired = document.getElementById("uRequired");
     const uRendered = document.getElementById("uRendered");
     const uRemaining = document.getElementById("uRemaining");
     const uDays = document.getElementById("uDays");
+
+    const todayStatusEl = document.getElementById("todayStatus");
+    const todayHoursEl = document.getElementById("todayHours");
+    const todayWorkTypeEl = document.getElementById("todayWorkType");
+    const weekHoursEl = document.getElementById("weekHours");
 
     const dtrBody = document.getElementById("dtrBody");
     const monthLabel = document.getElementById("monthLabel");
@@ -128,6 +162,11 @@
       d.setHours(0, 0, 0, 0);
       d.setDate(d.getDate() + 1);
       return d;
+    }
+
+    function formatHours(ms) {
+      const hours = ms / (1000 * 60 * 60);
+      return (Math.floor(hours * 100) / 100).toFixed(2);
     }
 
     function isAM(dateObj) {
@@ -294,6 +333,11 @@
       uName.textContent = data.name ?? "-";
       uDept.textContent = data.department ?? "-";
 
+      const role = (data.role || "intern").toLowerCase();
+      uRole.textContent = role.toUpperCase();
+      uRole.classList.remove("intern", "employee");
+      uRole.classList.add(role === "employee" ? "employee" : "intern");
+
       requiredHours = Number(data.requiredHours ?? 0);
       uRequired.textContent = requiredHours ? `${requiredHours} hrs` : "-";
     }
@@ -456,11 +500,113 @@
       return slots;
     }
 
+    async function loadTodaySummary(uid) {
+      const q = query(
+        collection(db, "attendance"),
+        where("userId", "==", uid),
+        where("timestamp", ">=", startOfToday()),
+        where("timestamp", "<", startOfTomorrow()),
+        orderBy("timestamp", "asc")
+      );
+
+      const snap = await getDocs(q);
+
+      let timeIn = null;
+      let timeOut = null;
+      let workType = "-";
+
+      snap.forEach(docu => {
+        const a = docu.data();
+        if (!a.timestamp) return;
+        const dt = a.timestamp.toDate();
+
+        if (a.type === "Time In" && !timeIn) {
+          timeIn = dt;
+          if (a.workType) workType = a.workType;
+        }
+        if (a.type === "Time Out") {
+          timeOut = dt;
+          if (a.workType) workType = a.workType;
+        }
+      });
+
+      if (!timeIn) {
+        todayStatusEl.textContent = "Not Timed In";
+        todayHoursEl.textContent = "0.00 hrs";
+        todayWorkTypeEl.textContent = "-";
+        return;
+      }
+
+      if (timeIn && !timeOut) {
+        todayStatusEl.textContent = "Timed In (Incomplete)";
+        todayHoursEl.textContent = "—";
+        todayWorkTypeEl.textContent = workType;
+        return;
+      }
+
+      const diff = timeOut - timeIn;
+      todayStatusEl.textContent = "Completed";
+      todayHoursEl.textContent = `${formatHours(diff)} hrs`;
+      todayWorkTypeEl.textContent = workType;
+    }
+
+    function getWeekRangeMonSun() {
+      const now = new Date();
+      const day = now.getDay(); // 0 Sunday
+      const diffToMon = (day === 0 ? -6 : 1) - day;
+
+      const mon = new Date(now);
+      mon.setDate(now.getDate() + diffToMon);
+      mon.setHours(0,0,0,0);
+
+      const nextMon = new Date(mon);
+      nextMon.setDate(mon.getDate() + 7);
+      nextMon.setHours(0,0,0,0);
+
+      return { mon, nextMon };
+    }
+
+    async function loadWeekHours(uid) {
+      const { mon, nextMon } = getWeekRangeMonSun();
+
+      const q = query(
+        collection(db, "attendance"),
+        where("userId", "==", uid),
+        where("timestamp", ">=", mon),
+        where("timestamp", "<", nextMon),
+        orderBy("timestamp", "asc")
+      );
+
+      const snap = await getDocs(q);
+
+      let lastIn = null;
+      let totalMs = 0;
+
+      snap.forEach(docu => {
+        const a = docu.data();
+        if (!a.timestamp) return;
+
+        if (a.type === "Time In") {
+          lastIn = a.timestamp.toDate();
+        } else if (a.type === "Time Out" && lastIn) {
+          const out = a.timestamp.toDate();
+          const diff = out - lastIn;
+          if (diff > 0) totalMs += diff;
+          lastIn = null;
+        }
+      });
+
+      weekHoursEl.textContent = `${formatHours(totalMs)} hrs`;
+    }
+
     async function refreshAll() {
       if (!currentUid) return;
       await computeRenderedHours(currentUid);
       await loadMonthlyDTR(currentUid);
       await updateWorkTypeLock(currentUid);
+
+      await loadTodaySummary(currentUid);
+      await loadWeekHours(currentUid);
     }
 
     function stopAutoTimeInLoop() {
